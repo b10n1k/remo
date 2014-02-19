@@ -7,6 +7,8 @@ from django.forms.models import inlineformset_factory
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.timezone import now as now_utc
 
+from django_statsd.clients import statsd
+
 import forms
 
 from remo.base.decorators import permission_check
@@ -14,12 +16,13 @@ from remo.base.utils import datetime2pdt, get_or_create_instance
 from remo.voting.models import Poll, PollComment, RadioPoll, RangePoll, Vote
 from remo.voting.helpers import get_users_voted
 
+
 @permission_check()
 def list_votings(request):
     """List votings view."""
     user = request.user
     polls = Poll.objects.all()
-    
+
     if not user.groups.filter(name='Admin').exists():
         polls = Poll.objects.filter(valid_groups__in=user.groups.all())
 
@@ -50,34 +53,38 @@ def edit_voting(request, slug=None):
     poll, created = get_or_create_instance(Poll, slug=slug)
 
     can_delete_voting = False
-    extra = 0
+    extra_range_polls = 0
+    extra_radio_polls = 0
     current_voting_edit = False
     range_poll_formset = None
     radio_poll_formset = None
+
     if created:
         poll.created_by = request.user
-        extra = 1
+        extra_range_polls = 1
+        extra_radio_polls = 1
     else:
-        if (RangePoll.objects.filter(poll=poll).count() or
-                RadioPoll.objects.filter(poll=poll).count()) == 0:
-            extra = 1
+        if not poll.range_polls.exists():
+            extra_range_polls = 1
+        if not poll.radio_polls.exists():
+            extra_radio_polls = 1
         can_delete_voting = True
         date_now = datetime2pdt()
         if poll.start < date_now and poll.end > date_now:
             current_voting_edit = True
 
+    nominee_list = User.objects.filter(
+        groups__name='Rep', userprofile__registration_complete=True)
     if current_voting_edit:
         poll_form = forms.PollEditForm(request.POST or None, instance=poll)
     else:
         RangePollFormset = (inlineformset_factory(Poll, RangePoll,
                             formset=forms.BaseRangePollInlineFormSet,
-                            extra=extra, can_delete=True))
+                            extra=extra_range_polls, can_delete=True))
         RadioPollFormset = (inlineformset_factory(Poll, RadioPoll,
                             formset=forms.BaseRadioPollInlineFormSet,
-                            extra=extra, can_delete=True))
+                            extra=extra_radio_polls, can_delete=True))
 
-        nominee_list = User.objects.filter(
-            groups__name='Rep', userprofile__registration_complete=True)
         range_poll_formset = RangePollFormset(request.POST or None,
                                               instance=poll,
                                               user_list=nominee_list)
@@ -92,8 +99,16 @@ def edit_voting(request, slug=None):
 
         if created:
             messages.success(request, 'Voting successfully created.')
+            statsd.incr('voting.create_voting')
         else:
             messages.success(request, 'Voting successfully edited.')
+            statsd.incr('voting.edit_voting')
+
+        if not current_voting_edit:
+            statsd.incr('voting.create_range_poll',
+                        poll_form.radio_poll_formset.total_form_count())
+            statsd.incr('voting.create_radio_poll',
+                        poll_form.range_poll_formset.total_form_count())
 
         return redirect('voting_edit_voting', slug=poll.slug)
 
@@ -104,7 +119,8 @@ def edit_voting(request, slug=None):
                    'range_poll_formset': range_poll_formset,
                    'radio_poll_formset': radio_poll_formset,
                    'can_delete_voting': can_delete_voting,
-                   'current_voting_edit': current_voting_edit})
+                   'current_voting_edit': current_voting_edit,
+                   'nominee_list': nominee_list})
 
 
 @permission_check()
@@ -176,9 +192,11 @@ def view_voting(request, slug):
                 radio_poll_form.save()
             if poll.automated_poll:
                 poll_comment_form.save()
+                statsd.incr('voting.create_automated_poll_comment')
             Vote.objects.create(user=user, poll=poll)
             messages.success(request, ('Your vote has been '
                                        'successfully registered.'))
+            statsd.incr('voting.vote_voting')
             return redirect('voting_list_votings')
 
     data['range_poll_choice_forms'] = range_poll_choice_forms
@@ -197,4 +215,5 @@ def delete_voting(request, slug):
         voting = get_object_or_404(Poll, slug=slug)
         voting.delete()
         messages.success(request, 'Voting successfully deleted.')
+        statsd.incr('voting.delete_voting')
     return redirect('voting_list_votings')

@@ -13,17 +13,20 @@
         var lat = parseFloat(latitude);
         var lon = parseFloat(longitude);
 
-        // first clear the location input field
-        $input.val('');
-
         geocoder.reverseQuery([lon,lat], function (e, data) {
-            if (data.results.length < 1 || e) {
+            if (e || data.results.length < 1) {
+                $input.val(lat + ', ' + lon);
                 return false;
             }
             $.each(data.results[0], function (index, value) {
                 array.push(value.name);
             });
-            $input.val(array.join(', '));
+            if (array.length > 0) {
+                $input.val(array.join(', '));
+            }
+            else {
+                $input.val(lat + ', ' + lon);
+            }
         });
     }
 
@@ -36,7 +39,7 @@
         var text = $('select#id_activity').find(":selected").text();
         var $panel = $('#campaign-panel');
         var input = $panel.find('input');
-        var triggerInput = 'Participated in a campaign';
+        var triggerInput = $('#active-report-form').data('campaign-trigger');
 
         if (text === triggerInput) {
             $panel.slideDown();

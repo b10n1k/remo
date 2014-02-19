@@ -1,6 +1,6 @@
-import datetime
 import re
 
+from datetime import date, datetime
 from urlparse import urljoin
 
 from django.conf import settings
@@ -13,6 +13,7 @@ from django.forms.models import inlineformset_factory
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.cache import cache_control, never_cache
 
+from django_statsd.clients import statsd
 from waffle.decorators import waffle_flag
 
 import forms
@@ -20,19 +21,34 @@ import remo.base.utils as utils
 
 from remo.base.decorators import permission_check
 from remo.events.helpers import get_attendee_role_event
-from remo.profiles.models import UserProfile
-from models import (NGReport, NGReportComment, Report, ReportComment,
-                    ReportEvent, ReportLink)
-from utils import participation_type_to_number
+from remo.profiles.models import FunctionalArea, UserProfile
+from remo.reports import ACTIVITY_CAMPAIGN
+from remo.reports.models import (NGReport, NGReportComment, Report,
+                                 ReportComment, ReportEvent, ReportLink)
+from remo.reports.utils import participation_type_to_number
+
+
+# New reporting system
+LIST_NG_REPORTS_DEFAULT_SORT = 'report_date_desc'
+LIST_NG_REPORTS_VALID_SORTS = {
+    'reporter_desc': '-user__last_name,user__first_name',
+    'reporter_asc': 'user__last_name,user__first_name',
+    'mentor_desc': '-mentor__last_name,mentor__first_name',
+    'mentor_asc': 'mentor__last_name,mentor__first_name',
+    'activity_desc': '-activity__name',
+    'activity_asc': 'activity__name',
+    'report_date_desc': '-report_date',
+    'report_date_asc': 'report_date'}
+LIST_REPORTS_NUMBER_OF_REPORTS_PER_PAGE = 25
 
 # Old reporting system
 LIST_REPORTS_DEFAULT_SORT = 'updated_on_desc'
-LIST_REPORTS_VALID_SHORTS = {
+LIST_REPORTS_VALID_SORTS = {
     'updated_on_desc': '-updated_on',
     'updated_on_asc': 'updated_on',
     'reporter_desc': '-user__last_name,user__first_name',
     'reporter_asc': 'user__last_name,user__first_name',
-    'mentor_desc': 'mentor__last_name,mentor__first_name',
+    'mentor_desc': '-mentor__last_name,mentor__first_name',
     'mentor_asc': 'mentor__last_name,mentor__first_name',
     'empty_desc': '-empty',
     'empty_asc': 'empty',
@@ -40,14 +56,13 @@ LIST_REPORTS_VALID_SHORTS = {
     'overdue_asc': 'overdue',
     'month_desc': '-month',
     'month_asc': 'month'}
-LIST_REPORTS_NUMBER_OF_REPORTS_PER_PAGE = 25
 
 
 @permission_check()
 @cache_control(private=True, no_cache=True)
 def current_report(request, edit=False):
     display_name = request.user.userprofile.display_name
-    previous_month = utils.go_back_n_months(datetime.date.today(),
+    previous_month = utils.go_back_n_months(date.today(),
                                             first_day=True)
     month_name = utils.number2month(previous_month.month)
     report = utils.get_object_or_none(
@@ -143,8 +158,8 @@ def delete_report(request, display_name, year, month):
     """Delete report view."""
     user = get_object_or_404(User, userprofile__display_name=display_name)
     if request.method == 'POST':
-        year_month = datetime.datetime(year=int(year),
-                                       month=utils.month2number(month), day=1)
+        year_month = datetime(year=int(year),
+                              month=utils.month2number(month), day=1)
         report = get_object_or_404(Report, user=user, month=year_month)
         report.delete()
         messages.success(request, 'Report successfully deleted.')
@@ -165,8 +180,8 @@ def delete_report(request, display_name, year, month):
 def edit_report(request, display_name, year, month):
     """Edit report view."""
     user = get_object_or_404(User, userprofile__display_name=display_name)
-    year_month = datetime.datetime(year=int(year),
-                                   month=utils.month2number(month), day=1)
+    year_month = datetime(year=int(year),
+                          month=utils.month2number(month), day=1)
     report, created = utils.get_or_create_instance(Report, user=user,
                                                    month=year_month)
 
@@ -282,10 +297,10 @@ def list_reports(request, mentor=None, rep=None):
     number_of_reports = report_list.count()
 
     sort_key = request.GET.get('sort_key', LIST_REPORTS_DEFAULT_SORT)
-    if sort_key not in LIST_REPORTS_VALID_SHORTS:
+    if sort_key not in LIST_REPORTS_VALID_SORTS:
         sort_key = LIST_REPORTS_DEFAULT_SORT
 
-    sort_by = LIST_REPORTS_VALID_SHORTS[sort_key]
+    sort_by = LIST_REPORTS_VALID_SORTS[sort_key]
     report_list = report_list.order_by(*sort_by.split(','))
 
     paginator = Paginator(report_list, LIST_REPORTS_NUMBER_OF_REPORTS_PER_PAGE)
@@ -321,20 +336,30 @@ def edit_ng_report(request, display_name='', year=None,
                    month=None, day=None, id=None):
     user = request.user
     created = False
+    initial = {}
+
     if not id:
         report = NGReport()
         created = True
+        initial = {'location': '%s, %s, %s' % (user.userprofile.city,
+                                               user.userprofile.region,
+                                               user.userprofile.country),
+                   'latitude': user.userprofile.lat,
+                   'longitude': user.userprofile.lon}
     else:
         report = get_object_or_404(
             NGReport, pk=id, user__userprofile__display_name=display_name)
 
-    report_form = forms.NGReportForm(request.POST or None, instance=report)
+    report_form = forms.NGReportForm(request.POST or None, instance=report,
+                                     initial=initial)
     if report_form.is_valid():
         if created:
             report.user = user
             messages.success(request, 'Report successfully created.')
+            statsd.incr('reports.create_report')
         else:
             messages.success(request, 'Report successfully updated.')
+            statsd.incr('reports.edit_report')
         report_form.save()
         return redirect(report.get_absolute_url())
 
@@ -342,7 +367,8 @@ def edit_ng_report(request, display_name='', year=None,
                   {'report_form': report_form,
                    'pageuser': user,
                    'report': report,
-                   'created': created})
+                   'created': created,
+                   'campaign_trigger': ACTIVITY_CAMPAIGN})
 
 
 @waffle_flag('reports_ng_report')
@@ -371,6 +397,8 @@ def view_ng_report(request, display_name, year, month, day, id):
         obj.report = report
         obj.save()
         messages.success(request, 'Comment saved successfully.')
+        statsd.incr('reports.create_comment')
+        ctx_data['comment_form'] = forms.NGReportCommentForm()
 
     return render(request, template, ctx_data)
 
@@ -385,6 +413,7 @@ def delete_ng_report(request, display_name, year, month, day, id):
         report = get_object_or_404(NGReport, id=id)
         report.delete()
         messages.success(request, 'Report successfully deleted.')
+        statsd.incr('reports.delete_report')
 
     if request.user == user:
         return redirect('profiles_view_my_profile')
@@ -402,4 +431,85 @@ def delete_ng_report_comment(request, display_name, year, month, day, id,
         report_comment = get_object_or_404(NGReportComment, pk=comment_id)
         report_comment.delete()
         messages.success(request, 'Comment successfully deleted.')
+        statsd.incr('reports.delete_comment')
     return redirect(report.get_absolute_url())
+
+
+@waffle_flag('reports_ng_report')
+def list_ng_reports(request, mentor=None, rep=None, functional_area_slug=None):
+    today = datetime.utcnow().date()
+    report_list = NGReport.objects.filter(report_date__lte=today)
+    pageheader = 'Activities for Reps'
+    user = None
+    pageuser_is_mentor = False
+
+    if mentor or rep:
+        user = get_object_or_404(
+            User, userprofile__display_name__iexact=mentor or rep)
+
+        if mentor:
+            report_list = report_list.filter(mentor=user)
+            pageheader += ' mentored by %s' % user.get_full_name()
+            pageuser_is_mentor = True
+        elif rep:
+            report_list = report_list.filter(user=user)
+            pageheader = 'Activities for %s' % user.get_full_name()
+
+    if functional_area_slug:
+        functional_area = get_object_or_404(FunctionalArea,
+                                            slug=functional_area_slug)
+        report_list = report_list.filter(functional_areas=functional_area)
+        pageheader += ' for area %s' % functional_area.name
+
+    if 'query' in request.GET:
+        query = request.GET['query'].strip()
+        report_list = report_list.filter(
+            Q(ngreportcomment__comment__icontains=query) |
+            Q(activity__name__icontains=query) |
+            Q(activity_description__icontains=query) |
+            Q(campaign__name__icontains=query) |
+            Q(functional_areas__name__icontains=query) |
+            Q(location__icontains=query) |
+            Q(link__icontains=query) |
+            Q(link_description__icontains=query) |
+            Q(user__first_name__icontains=query) |
+            Q(user__last_name__icontains=query) |
+            Q(user__userprofile__local_name__icontains=query) |
+            Q(user__userprofile__display_name__icontains=query) |
+            Q(mentor__first_name__icontains=query) |
+            Q(mentor__last_name__icontains=query) |
+            Q(mentor__userprofile__local_name__icontains=query) |
+            Q(mentor__userprofile__display_name__icontains=query))
+
+    report_list = report_list.distinct()
+    number_of_reports = report_list.count()
+
+    sort_key = request.GET.get('sort_key', LIST_NG_REPORTS_DEFAULT_SORT)
+    if sort_key not in LIST_NG_REPORTS_VALID_SORTS:
+        sort_key = LIST_NG_REPORTS_DEFAULT_SORT
+
+    sort_by = LIST_NG_REPORTS_VALID_SORTS[sort_key]
+    report_list = report_list.order_by(*sort_by.split(','))
+
+    paginator = Paginator(report_list, LIST_REPORTS_NUMBER_OF_REPORTS_PER_PAGE)
+
+    # Make sure page request is an int. If not, deliver first page.
+    try:
+        page = int(request.GET.get('page', '1'))
+    except ValueError:
+        page = 1
+
+    # If page request (9999) is out of range, deliver last page of results.
+    try:
+        reports = paginator.page(page)
+    except (EmptyPage, InvalidPage):
+        reports = paginator.page(paginator.num_pages)
+
+    return render(request, 'list_ng_reports.html',
+                  {'reports': reports,
+                   'number_of_reports': number_of_reports,
+                   'sort_key': sort_key,
+                   'pageheader': pageheader,
+                   'pageuser': user,
+                   'pageuser_is_mentor': pageuser_is_mentor,
+                   'query': request.GET.get('query', '')})

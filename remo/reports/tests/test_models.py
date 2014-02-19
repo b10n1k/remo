@@ -10,10 +10,10 @@ from remo.base.utils import go_back_n_months
 from remo.events.helpers import get_event_link
 from remo.events.tests import EventFactory, AttendanceFactory
 from remo.profiles.tests import UserFactory
-from remo.reports.models import (Activity, NGReport, EVENT_ATTENDANCE_ACTIVITY,
-                                 EVENT_CREATION_ACTIVITY, OVERDUE_DAY)
-
+from remo.reports import ACTIVITY_EVENT_ATTEND, ACTIVITY_EVENT_CREATE
+from remo.reports.models import Activity, NGReport, OVERDUE_DAY
 from remo.reports.tests import (NGReportFactory, NGReportCommentFactory,
+                                NGReportCommentFactoryNoSignals,
                                 ReportCommentFactory, ReportFactory)
 
 
@@ -233,7 +233,7 @@ class NGReportComment(TestCase):
 class NGReportSignalsTest(TestCase):
     def test_create_attendance_report_owner(self):
         """Test creating a passive attendance report for event owner."""
-        activity = Activity.objects.get(name=EVENT_ATTENDANCE_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_ATTEND)
         user = UserFactory.create(groups=['Rep', 'Mentor'],
                                   userprofile__initial_council=True)
         event = EventFactory.create(owner=user)
@@ -242,7 +242,7 @@ class NGReportSignalsTest(TestCase):
 
         location = '%s, %s, %s' % (event.city, event.region, event.country)
         eq_(report.mentor, user.userprofile.mentor)
-        eq_(report.activity.name, EVENT_ATTENDANCE_ACTIVITY)
+        eq_(report.activity.name, ACTIVITY_EVENT_ATTEND)
         eq_(report.latitude, event.lat)
         eq_(report.longitude, event.lon)
         eq_(report.location, location)
@@ -255,7 +255,7 @@ class NGReportSignalsTest(TestCase):
 
     def test_create_attendance_report_attendee(self):
         """Test creating a passive report after attending an event."""
-        activity = Activity.objects.get(name=EVENT_ATTENDANCE_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_ATTEND)
         event = EventFactory.create()
         user = UserFactory.create(groups=['Rep', 'Mentor'],
                                   userprofile__initial_council=True)
@@ -265,7 +265,7 @@ class NGReportSignalsTest(TestCase):
 
         location = '%s, %s, %s' % (event.city, event.region, event.country)
         eq_(report.mentor, user.userprofile.mentor)
-        eq_(report.activity.name, EVENT_ATTENDANCE_ACTIVITY)
+        eq_(report.activity.name, ACTIVITY_EVENT_ATTEND)
         eq_(report.latitude, event.lat)
         eq_(report.longitude, event.lon)
         eq_(report.location, location)
@@ -278,7 +278,7 @@ class NGReportSignalsTest(TestCase):
 
     def test_create_event_report(self):
         """Test creating a passive report after creating an event."""
-        activity = Activity.objects.get(name=EVENT_CREATION_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_CREATE)
         event = EventFactory.build()
         event.owner = UserFactory.create()
         event.save()
@@ -287,7 +287,7 @@ class NGReportSignalsTest(TestCase):
 
         location = '%s, %s, %s' % (event.city, event.region, event.country)
         eq_(report.mentor, event.owner.userprofile.mentor)
-        eq_(report.activity.name, EVENT_CREATION_ACTIVITY)
+        eq_(report.activity.name, ACTIVITY_EVENT_CREATE)
         eq_(report.latitude, event.lat)
         eq_(report.longitude, event.lon)
         eq_(report.location, location)
@@ -300,7 +300,7 @@ class NGReportSignalsTest(TestCase):
 
     def test_delete_attendance_report(self):
         """Test delete passive report after attendance delete."""
-        activity = Activity.objects.get(name=EVENT_ATTENDANCE_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_ATTEND)
         event = EventFactory.create()
         user = UserFactory.create(groups=['Rep', 'Mentor'],
                                   userprofile__initial_council=True)
@@ -313,7 +313,7 @@ class NGReportSignalsTest(TestCase):
 
     def test_delete_event_report(self):
         """Test delete passive report after event delete."""
-        activity = Activity.objects.get(name=EVENT_CREATION_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_CREATE)
         event = EventFactory.create()
         user = event.owner
         query = NGReport.objects.filter(event=event, user=user,
@@ -329,8 +329,8 @@ class NGReportSignalsTest(TestCase):
         """Test update report after event edit."""
         event = EventFactory.create()
         report = NGReportFactory.create(user=event.owner, event=event,
-                                        report_date=event.start)
-        eq_(report.report_date, event.start)
+                                        report_date=event.start.date())
+        eq_(report.report_date, event.start.date())
 
         event.start += datetime.timedelta(days=5)
         event.end += datetime.timedelta(days=5)
@@ -363,3 +363,61 @@ class NGReportSignalsTest(TestCase):
         self.assertQuerysetEqual(report.functional_areas.all(),
                                  [e.name for e in categories.all()[:1]],
                                  lambda x: x.name)
+
+    def test_send_email_on_report_comment_settings_True_one_user(self):
+        """Test sending email when a new comment is added on a NGReport
+
+        and the user has the option enabled in his/her settings.
+        """
+        commenter = UserFactory.create()
+        reporter = UserFactory.create(
+            userprofile__receive_email_on_add_comment=True)
+        report = NGReportFactory.create(user=reporter)
+        NGReportCommentFactory.create(user=commenter, report=report,
+                                      comment='This is a comment')
+
+        eq_(len(mail.outbox), 1)
+        eq_(reporter.email, mail.outbox[0].to[0])
+        msg = ('[Report] User {0} commented on {1}'
+               .format(commenter.get_full_name(), report))
+        eq_(mail.outbox[0].subject, msg)
+
+    def test_send_email_on_report_comment_settings_False_one_user(self):
+        """Test sending email when a new comment is added on a NGReport
+
+        and the user has the option disabled in his/her settings.
+        """
+        comment_user = UserFactory.create()
+        user = UserFactory.create(
+            userprofile__receive_email_on_add_comment=False)
+        report = NGReportFactory.create(user=user)
+        NGReportCommentFactory.create(user=comment_user, report=report,
+                                      comment='This is a comment')
+
+        eq_(len(mail.outbox), 0)
+
+    def test_send_email_on_report_comment_settings_True_multiple_users(self):
+        """Test sending email when a new comment is added on a NGReport
+
+        and the users have the option enabled in their settings.
+        """
+        commenter = UserFactory.create()
+        reporter = UserFactory.create(
+            userprofile__receive_email_on_add_comment=True)
+        report = NGReportFactory.create(user=reporter)
+        users_with_comments = UserFactory.create_batch(
+            2, userprofile__receive_email_on_add_comment=True)
+        # disconnect the signals in order to add two users in NGReportComment
+        for user_obj in users_with_comments:
+            NGReportCommentFactoryNoSignals.create(
+                user=user_obj, report=report, comment='This is a comment')
+        NGReportCommentFactory.create(user=commenter, report=report,
+                                      comment='This is a comment')
+
+        eq_(len(mail.outbox), 3)
+        eq_(reporter.email, mail.outbox[0].to[0])
+        eq_(users_with_comments[0].email, mail.outbox[1].to[0])
+        eq_(users_with_comments[1].email, mail.outbox[2].to[0])
+        msg = ('[Report] User {0} commented on {1}'
+               .format(commenter.get_full_name(), report))
+        eq_(mail.outbox[0].subject, msg)

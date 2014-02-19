@@ -7,8 +7,10 @@ from django.db import models
 from django.db.models.signals import (m2m_changed, post_save, pre_delete,
                                       pre_save)
 from django.dispatch import receiver
+from django.utils.timezone import now as utc_now
 
 import caching.base
+from django_statsd.clients import statsd
 from south.signals import post_migrate
 
 import remo.base.utils as utils
@@ -18,6 +20,8 @@ from remo.base.models import GenericActiveManager
 from remo.events.helpers import get_event_link
 from remo.events.models import Attendance as EventAttendance, Event
 from remo.profiles.models import FunctionalArea
+from remo.reports import (ACTIVITY_CAMPAIGN, ACTIVITY_EVENT_ATTEND,
+                          ACTIVITY_EVENT_CREATE, READONLY_ACTIVITIES)
 from remo.reports.tasks import send_remo_mail
 
 # OLD REPORTING SYSTEM
@@ -189,10 +193,6 @@ class ReportLink(models.Model):
 
 
 # NEW REPORTING SYSTEM
-EVENT_ATTENDANCE_ACTIVITY = 'Attended an Event'
-EVENT_CREATION_ACTIVITY = 'Created an Event'
-
-
 class Activity(models.Model):
     name = models.CharField(max_length=100)
     active = models.BooleanField(default=True)
@@ -201,11 +201,23 @@ class Activity(models.Model):
     active_objects = GenericActiveManager()
 
     class Meta:
-        verbose_name_plural = 'Activities'
         ordering = ['name']
+        verbose_name = 'activity'
+        verbose_name_plural = 'activities'
 
     def __unicode__(self):
         return self.name
+
+    def get_absolute_delete_url(self):
+        return reverse('delete_activity', kwargs={'pk': self.id})
+
+    def get_absolute_edit_url(self):
+        return reverse('edit_activity', kwargs={'pk': self.id})
+
+    @property
+    def is_editable(self):
+        """Check if activity is editable."""
+        return not self.name in READONLY_ACTIVITIES
 
 
 class Campaign(models.Model):
@@ -217,9 +229,17 @@ class Campaign(models.Model):
 
     class Meta:
         ordering = ['name']
+        verbose_name = 'campaign'
+        verbose_name_plural = 'campaigns'
 
     def __unicode__(self):
         return self.name
+
+    def get_absolute_delete_url(self):
+        return reverse('delete_campaign', kwargs={'pk': self.id})
+
+    def get_absolute_edit_url(self):
+        return reverse('edit_campaign', kwargs={'pk': self.id})
 
 
 class NGReport(caching.base.CachingMixin, models.Model):
@@ -278,16 +298,62 @@ class NGReport(caching.base.CachingMixin, models.Model):
     def get_report_date(self):
         return self.report_date.strftime('%d %b %Y')
 
+    @property
+    def is_future_report(self):
+        if self.report_date > utc_now().date():
+            return True
+        return False
+
     def save(self, *args, **kwargs):
-        """Override save method for custom functionality."""
-        self.mentor = self.user.userprofile.mentor
-        super(NGReport, self).save(*args, **kwargs)
+        """Override save method."""
+        up = self.user.userprofile
+        one_day = datetime.timedelta(1)
+
+        # Save the mentor of the user if no mentor is defined.
+        if not self.mentor:
+            self.mentor = up.mentor
+
+        # Calculate the current and longest streak for a user.
+        if not self.is_future_report:
+            if (up.current_streak_start and up.current_streak_end and
+                (self.report_date >= up.current_streak_start - one_day) and
+                    (self.report_date <= up.current_streak_end + one_day)):
+                if self.report_date < up.current_streak_start:
+                    up.current_streak_start = self.report_date
+                if self.report_date > up.current_streak_end:
+                    up.current_streak_end = self.report_date
+            else:
+                up.current_streak_start = self.report_date
+                up.current_streak_end = self.report_date
+
+            # Longest streak
+            if (up.current_streak_start and up.current_streak_end and
+                    up.longest_streak_start and up.longest_streak_end):
+                longest_streak_diff = (up.longest_streak_end -
+                                       up.longest_streak_start)
+                current_streak_diff = (up.current_streak_end -
+                                       up.current_streak_start)
+                if current_streak_diff > longest_streak_diff:
+                    up.longest_streak_start = up.current_streak_start
+                    up.longest_streak_end = up.current_streak_end
+            else:
+                up.longest_streak_start = self.report_date
+                up.longest_streak_end = self.report_date
+            up.save()
+        super(NGReport, self).save()
 
     class Meta:
         ordering = ['-report_date', '-created_on']
 
     def __unicode__(self):
-        return '%s %s' % (self.report_date, self.id)
+        if self.activity.name == ACTIVITY_EVENT_ATTEND and self.event:
+            return 'Attended event "%s"' % self.event.name
+        elif self.activity.name == ACTIVITY_EVENT_CREATE and self.event:
+            return 'Created event "%s"' % self.event.name
+        elif self.activity.name == ACTIVITY_CAMPAIGN:
+            return 'Participated in campaign "%s"' % self.campaign.name
+        else:
+            return self.activity.name
 
 
 class NGReportComment(models.Model):
@@ -319,12 +385,12 @@ class NGReportComment(models.Model):
 def create_passive_attendance_report(sender, instance, **kwargs):
     """Automatically create a passive report after event attendance save."""
     if instance.user.groups.filter(name='Rep').exists():
-        activity = Activity.objects.get(name=EVENT_ATTENDANCE_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_ATTEND)
         attrs = {
             'user': instance.user,
             'event': instance.event,
             'activity': activity,
-            'report_date': instance.event.start,
+            'report_date': instance.event.start.date(),
             'longitude': instance.event.lon,
             'latitude': instance.event.lat,
             'location': "%s, %s, %s" % (instance.event.city,
@@ -336,6 +402,7 @@ def create_passive_attendance_report(sender, instance, **kwargs):
 
         report = NGReport.objects.create(**attrs)
         report.functional_areas.add(*instance.event.categories.all())
+        statsd.incr('reports.create_passive_attendance')
 
 
 @receiver(post_save, sender=Event,
@@ -344,7 +411,7 @@ def create_update_passive_event_report(sender, instance, created, **kwargs):
     """Automatically create/update a passive report on event creation."""
 
     attrs = {
-        'report_date': instance.start,
+        'report_date': instance.start.date(),
         'longitude': instance.lon,
         'latitude': instance.lat,
         'location': "%s, %s, %s" % (instance.city,
@@ -354,7 +421,7 @@ def create_update_passive_event_report(sender, instance, created, **kwargs):
         'activity_description': instance.description}
 
     if created:
-        activity = Activity.objects.get(name=EVENT_CREATION_ACTIVITY)
+        activity = Activity.objects.get(name=ACTIVITY_EVENT_CREATE)
         attrs.update({
             'user': instance.owner,
             'event': instance,
@@ -363,8 +430,10 @@ def create_update_passive_event_report(sender, instance, created, **kwargs):
 
         report = NGReport.objects.create(**attrs)
         report.functional_areas.add(*instance.categories.all())
+        statsd.incr('reports.create_passive_event')
     else:
         NGReport.objects.filter(event=instance).update(**attrs)
+        statsd.incr('reports.update_passive_event')
 
 
 @receiver(pre_delete, sender=EventAttendance,
@@ -374,9 +443,10 @@ def delete_passive_attendance_report(sender, instance, **kwargs):
     attrs = {
         'user': instance.user,
         'event': instance.event,
-        'activity': Activity.objects.get(name=EVENT_ATTENDANCE_ACTIVITY)}
+        'activity': Activity.objects.get(name=ACTIVITY_EVENT_ATTEND)}
 
     NGReport.objects.filter(**attrs).delete()
+    statsd.incr('reports.delete_passive_attendance')
 
 
 @receiver(pre_delete, sender=Event,
@@ -384,6 +454,7 @@ def delete_passive_attendance_report(sender, instance, **kwargs):
 def delete_passive_event_report(sender, instance, **kwargs):
     """Automatically delete a passive report after an event is deleted."""
     NGReport.objects.filter(event=instance).delete()
+    statsd.incr('reports.delete_passive_event')
 
 
 @receiver(pre_save, sender=Event,
@@ -391,12 +462,12 @@ def delete_passive_event_report(sender, instance, **kwargs):
 def update_passive_report_event_owner(sender, instance, **kwargs):
     """Automatically update passive reports event owner."""
     if instance.id:
-        previous_owner = Event.objects.get(pk=instance.id).owner
-        if previous_owner != instance.owner:
+        event = get_object_or_none(Event, pk=instance.id)
+        if event and event.owner != instance.owner:
             attrs = {
-                'user': previous_owner,
+                'user': event.owner,
                 'event': instance,
-                'activity': Activity.objects.get(name=EVENT_CREATION_ACTIVITY)}
+                'activity': Activity.objects.get(name=ACTIVITY_EVENT_CREATE)}
             mentor = instance.owner.userprofile.mentor
             NGReport.objects.filter(**attrs).update(user=instance.owner,
                                                     mentor=mentor)
@@ -422,3 +493,34 @@ def update_passive_report_functional_areas(sender, instance, action, pk_set,
 
         if action == 'post_clear':
             report.functional_areas.clear()
+
+
+@receiver(post_save, sender=NGReportComment,
+          dispatch_uid='email_commenters_on_add_ng_report_comment_signal')
+def email_commenters_on_add_ng_report_comment(sender, instance, **kwargs):
+    """Email a user when a comment is added to a continuous report instance."""
+    subject = '[Report] User {0} commented on {1}'
+    email_template = 'emails/user_notification_on_add_ng_report_comment.txt'
+    report = instance.report
+
+    # Send an email to all users commented so far on the report except fom
+    # the user who made the comment. Dedup the list with unique IDs.
+    commenters = set(NGReportComment.objects.filter(report=report)
+                     .exclude(user=instance.user)
+                     .values_list('user', flat=True))
+
+    # Add the owner of the report in the list
+    if report.user.id not in commenters:
+        commenters.add(report.user.id)
+
+    for user_id in commenters:
+        user = User.objects.get(pk=user_id)
+        if (user.userprofile.receive_email_on_add_comment and
+                user != instance.user):
+            ctx_data = {'report': report, 'user': user,
+                        'commenter': instance.user,
+                        'comment': instance.comment,
+                        'created_on': instance.created_on}
+            subject = subject.format(instance.user.get_full_name(), report)
+            send_remo_mail.delay([user_id], subject,
+                                 email_template, ctx_data)

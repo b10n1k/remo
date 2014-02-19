@@ -6,7 +6,7 @@
 
 {% block content %}
 <main role="main" class="reports-main">
-  <form id="active-report-form" method="post">
+  <form id="active-report-form" method="post" data-campaign-trigger="{{ campaign_trigger }}">
     {{ csrf() }}
 
     <div class="row">
@@ -118,8 +118,7 @@
                  title="Location of contribution" data-tooltip
                  data-options="disable-for-touch:true">
               {{ field_with_attrs(report_form.location,
-                                  placeholder="City, Region, Country",
-                                  readonly='readonly') }}
+                                  placeholder="City, Region, Country") }}
               <button type="button"
                       class="small button pict-button locate"
                       data-reveal-id="map-point">Choose a location

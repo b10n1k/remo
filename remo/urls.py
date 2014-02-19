@@ -50,6 +50,7 @@ urlpatterns = patterns(
     url(r'^events/', include('remo.events.event_urls')),
 
     # reports
+    url(r'^ng-reports/', include('remo.reports.ng_report_urls')),
     url(r'^reports/', include('remo.reports.report_urls')),
 
     # featuredrep
@@ -69,6 +70,9 @@ urlpatterns = patterns(
     # Voting
     url(r'^voting/', include('remo.voting.voting_urls')),
     url(r'^v/', include('remo.voting.v_urls')),
+
+    # Portal base content
+    url(r'^content/', include('remo.base.content_urls')),
 
     # Generate a robots.txt
     (r'^robots\.txt$', robots_txt),

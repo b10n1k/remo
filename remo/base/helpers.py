@@ -2,6 +2,7 @@ import base64
 import binascii
 import re
 import time
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -9,10 +10,11 @@ from django.contrib.markup.templatetags import markup
 from django.core.urlresolvers import reverse
 from django.template.loader import render_to_string
 
+from Crypto.Cipher import AES
+from funfactory import utils
 from jingo import register
 from jinja2 import Markup
 
-from Crypto.Cipher import AES
 
 AES_PADDING = 16
 AES_IV_LENGTH = 16
@@ -230,3 +232,21 @@ def ical_format_lines(text):
         ret_line += char
 
     return ret_line
+
+
+@register.function
+def get_attr(obj, value, default):
+    """Add a gettatr helper in templates."""
+    return getattr(obj, value, default)
+
+
+@register.filter
+def absolutify(url):
+    """Prepend the SITE_URL to the url."""
+    return utils.absolutify(url)
+
+
+@register.function
+def get_date_n_weeks_before(date, weeks=0):
+    """Return the date X weeks before date."""
+    return date - timedelta(weeks=weeks)

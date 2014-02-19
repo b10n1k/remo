@@ -15,7 +15,7 @@ Preparing Your System
 
    - For debian based systems::
 
-     $ sudo apt-get install python-pip python-virtualenv git mysql-server
+     $ sudo apt-get install python-dev python-pip python-virtualenv git mysql-server libmysqlclient-dev libxslt1.1 libxml2 libxml2-dev
 
    For other Linux distributions, you can consult the documentation of your distribution.
 
@@ -168,6 +168,10 @@ When you want to start contributing...
    To load *demo users* run (within your VM)::
 
      (venv)$ ./manage.py loaddata demo_users
+
+   To load *demo functional areas* run::
+
+     (venv)$ ./manage.py loaddata demo_functional_areas
 
    To load *demo reports* run::
 

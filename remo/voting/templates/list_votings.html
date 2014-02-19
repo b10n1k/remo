@@ -1,6 +1,10 @@
 {% extends "base_fd4.html" %}
 {% block pagetitle %}Mozilla Reps - Voting{% endblock %}
 
+    <link href="/remo/voting/staic/voting/css/app-fd4.less" rel="stylesheet"
+          media="screen,projection,tv" />
+
+
 {% block content %}
 <main role="main" class="voting-main">
   <div class="row">
@@ -51,7 +55,7 @@
 	      <td>
 		<meter min="0" optimum="0.85" value="{{ poll|get_users_voted/poll|get_voters_per_group }}" max="1" high="0.8">
 		  <div class="progressbar">
-		    <span class="progressspan" style="width: {{ poll|get_users_voted/poll|get_voters_per_group*100 }}%;"></span>
+		    <span class="progressspan" data-percent="{{ poll|get_users_voted/poll|get_voters_per_group*100 }}" data-type="bar" data-fill="#ddd"></span>
 		  </div>
 		</meter>
 	      </td>

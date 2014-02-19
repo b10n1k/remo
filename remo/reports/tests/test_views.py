@@ -13,11 +13,11 @@ from waffle import Flag
 
 from remo.base.utils import go_back_n_months
 from remo.base.tests import RemoTestCase, requires_login, requires_permission
-from remo.profiles.tests import UserFactory
+from remo.profiles.tests import FunctionalAreaFactory, UserFactory
 from remo.reports.models import NGReport, NGReportComment, ReportComment
 from remo.reports.tests import (NGReportFactory, NGReportCommentFactory,
                                 ReportCommentFactory, ReportFactory)
-from remo.reports.views import LIST_REPORTS_VALID_SHORTS
+from remo.reports.views import LIST_REPORTS_VALID_SORTS
 
 
 class ViewsTest(TestCase):
@@ -62,7 +62,7 @@ class ViewsTest(TestCase):
         response = c.get(reverse('reports_list_reports'))
         self.assertTemplateUsed(response, 'reports_list.html')
 
-        for sort_key in LIST_REPORTS_VALID_SHORTS:
+        for sort_key in LIST_REPORTS_VALID_SORTS:
             response = c.get(urlparams(reverse('reports_list_reports'),
                                        sort_key=sort_key))
             self.assertTemplateUsed(response, 'reports_list.html')
@@ -316,6 +316,19 @@ class EditNGReportTests(RemoTestCase):
         # Create waffle flag
         Flag.objects.create(name='reports_ng_report', everyone=True)
 
+    def test_new_report_initial_data(self):
+        user = UserFactory.create(groups=['Mentor'], userprofile__city='City',
+                                  userprofile__region='Region',
+                                  userprofile__country='Country',
+                                  userprofile__lat=0,
+                                  userprofile__lon=90)
+        response = self.get(url=reverse('reports_new_ng_report'),
+                            user=user)
+        initial = response.context['report_form'].initial
+        eq_(initial['location'], 'City, Region, Country')
+        eq_(initial['latitude'], 0)
+        eq_(initial['longitude'], 90)
+
     def test_get_as_owner(self):
         report = NGReportFactory.create()
         response = self.get(url=report.get_absolute_edit_url(),
@@ -548,3 +561,95 @@ class DeleteNGReportCommentTests(RemoTestCase):
         self.post(user=user, url=report_comment.get_absolute_delete_url())
         ok_(not NGReportComment.objects.filter(pk=report_comment.id).exists())
         redirect_mock.assert_called_with(report.get_absolute_url())
+
+
+class ListNGReportTests(RemoTestCase):
+    """Tests related to report listing."""
+    def setUp(self):
+        Flag.objects.create(name='reports_ng_report', everyone=True)
+
+    def test_list(self):
+        """Test view report list page."""
+        report = NGReportFactory.create()
+        response = self.get(reverse('list_ng_reports'))
+        self.assertTemplateUsed(response, 'list_ng_reports.html')
+        eq_(response.context['pageheader'], 'Activities for Reps')
+        eq_(response.status_code, 200)
+        eq_(set(response.context['reports'].object_list),
+            set([report]))
+
+    def test_list_rep(self):
+        """Test page header context for rep."""
+        user = UserFactory.create(groups=['Rep'], first_name='Foo',
+                                  last_name='Bar')
+        name = user.userprofile.display_name
+        report = NGReportFactory.create(user=user)
+        NGReportFactory.create()
+        response = self.get(url=reverse('list_ng_reports_rep',
+                                        kwargs={'rep': name}), user=user)
+        eq_(response.context['pageheader'], 'Activities for Foo Bar')
+        eq_(set(response.context['reports'].object_list),
+            set([report]), 'Other Rep reports are listed')
+
+    def test_list_mentor(self):
+        """Test page header context for mentor."""
+        mentor = UserFactory.create(groups=['Mentor'], first_name='Foo',
+                                    last_name='Bar')
+        name = mentor.userprofile.display_name
+
+        report_1 = NGReportFactory.create(mentor=mentor)
+        report_2 = NGReportFactory.create(mentor=mentor)
+        NGReportFactory.create()
+        response = self.get(url=reverse('list_ng_reports_mentor',
+                                        kwargs={'mentor': name}), user=mentor)
+        msg = 'Activities for Reps mentored by Foo Bar'
+        eq_(response.context['pageheader'], msg)
+        eq_(set(response.context['reports'].object_list),
+            set([report_1, report_2]), 'Other Mentor reports are listed')
+
+    def test_get_invalid_order(self):
+        """Test get invalid sort order."""
+        response = self.get(url=reverse('list_ng_reports'),
+                            data={'sort_key': 'invalid'})
+        eq_(response.context['sort_key'], 'report_date_desc')
+
+    def test_future_not_listed(self):
+        report = NGReportFactory.create()
+        NGReportFactory.create(report_date=datetime.date(2999, 1, 1))
+        response = self.get(reverse('list_ng_reports'))
+        eq_(set(response.context['reports'].object_list),
+            set([report]))
+
+    def test_functional_area_list(self):
+        functional_area_1 = FunctionalAreaFactory.create()
+        functional_area_2 = FunctionalAreaFactory.create()
+        report = NGReportFactory.create(functional_areas=[functional_area_1])
+        NGReportFactory.create(functional_areas=[functional_area_2])
+        url = reverse('list_ng_reports_functional_area',
+                      kwargs={'functional_area_slug': functional_area_1.slug})
+        response = self.get(url=url)
+        eq_(set(response.context['reports'].object_list), set([report]))
+
+    def test_rep_functional_area_list(self):
+        user = UserFactory.create(groups=['Rep'])
+        functional_area = FunctionalAreaFactory.create()
+        report = NGReportFactory.create(user=user,
+                                        functional_areas=[functional_area])
+        NGReportFactory.create(functional_areas=[functional_area])
+        url = reverse('list_ng_reports_rep_functional_area',
+                      kwargs={'functional_area_slug': functional_area.slug,
+                              'rep': user.userprofile.display_name})
+        response = self.get(url=url)
+        eq_(set(response.context['reports'].object_list), set([report]))
+
+    def test_mentor_functional_area_list(self):
+        mentor = UserFactory.create(groups=['Mentor'])
+        functional_area = FunctionalAreaFactory.create()
+        report = NGReportFactory.create(mentor=mentor,
+                                        functional_areas=[functional_area])
+        NGReportFactory.create(functional_areas=[functional_area])
+        url = reverse('list_ng_reports_mentor_functional_area',
+                      kwargs={'functional_area_slug': functional_area.slug,
+                              'mentor': mentor.userprofile.display_name})
+        response = self.get(url=url)
+        eq_(set(response.context['reports'].object_list), set([report]))

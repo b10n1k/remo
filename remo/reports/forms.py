@@ -4,8 +4,10 @@ from django.utils.timezone import now as now_utc
 
 import happyforms
 
-from remo.reports.models import (NGReport, NGReportComment, Report,
-                                 ReportComment, ReportEvent, ReportLink)
+from remo.reports import ACTIVITY_CAMPAIGN, UNLISTED_ACTIVITIES
+from remo.reports.models import (Activity, Campaign, NGReport, NGReportComment,
+                                 Report, ReportComment, ReportEvent,
+                                 ReportLink)
 
 
 # Old reporting system
@@ -94,6 +96,10 @@ class ReportLinkForm(happyforms.ModelForm):
 # New Generation reporting system
 class NGReportForm(happyforms.ModelForm):
     report_date = forms.DateField(input_formats=['%d %B %Y'])
+    activity = forms.ModelChoiceField(
+        queryset=Activity.active_objects.exclude(name__in=UNLISTED_ACTIVITIES))
+    campaign = forms.ModelChoiceField(queryset=Campaign.active_objects.all(),
+                                      required=False)
 
     def __init__(self, *args, **kwargs):
         """ Initialize form.
@@ -112,7 +118,7 @@ class NGReportForm(happyforms.ModelForm):
         cdata = self.cleaned_data
 
         activity = cdata.get('activity')
-        if (activity and activity.name == 'Participated in a campaign'
+        if (activity and activity.name == ACTIVITY_CAMPAIGN
                 and not cdata.get('campaign')):
             msg = 'Please select an option from the list.'
             self._errors['campaign'] = self.error_class([msg])
@@ -142,3 +148,17 @@ class NGReportCommentForm(happyforms.ModelForm):
         model = NGReportComment
         fields = ['comment']
         widgets = {'comment': forms.TextInput()}
+
+
+class ActivityForm(happyforms.ModelForm):
+    """Form of activity type."""
+
+    class Meta:
+        model = Activity
+
+
+class CampaignForm(happyforms.ModelForm):
+    """Form of campaign type."""
+
+    class Meta:
+        model = Campaign

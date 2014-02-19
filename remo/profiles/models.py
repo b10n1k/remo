@@ -5,13 +5,16 @@ import django.utils.timezone as timezone
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.core.urlresolvers import reverse
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 import caching.base
+from django_statsd.clients import statsd
 from south.signals import post_migrate
+from uuslug import uuslug as slugify
 
 from remo.base.models import GenericActiveManager
 from remo.base.utils import add_permissions_to_groups
@@ -55,17 +58,32 @@ def _validate_mentor(data, **kwargs):
 
 class FunctionalArea(models.Model):
     """Mozilla functional areas."""
-    name = models.CharField(max_length=100)
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(blank=True, max_length=100)
     active = models.BooleanField(default=True)
 
     active_objects = GenericActiveManager()
     objects = models.Manager()
 
-    class Meta:
-        ordering = ['name']
+    def save(self, *args, **kwargs):
+        # Create unique slug
+        if not self.slug:
+            self.slug = slugify(self.name, instance=self)
+        super(FunctionalArea, self).save(*args, **kwargs)
+
+    def get_absolute_delete_url(self):
+        return reverse('delete_functional_area', kwargs={'pk': self.id})
+
+    def get_absolute_edit_url(self):
+        return reverse('edit_functional_area', kwargs={'pk': self.id})
 
     def __unicode__(self):
         return self.name
+
+    class Meta:
+        ordering = ['name']
+        verbose_name = 'functional area'
+        verbose_name_plural = 'functional areas'
 
 
 class UserProfile(caching.base.CachingMixin, models.Model):
@@ -148,6 +166,11 @@ class UserProfile(caching.base.CachingMixin, models.Model):
                                                              default=True)
     mozillian_username = models.CharField(blank=True, default='',
                                           max_length=40)
+    current_streak_start = models.DateField(null=True, blank=True)
+    current_streak_end = models.DateField(null=True, blank=True)
+    longest_streak_start = models.DateField(null=True, blank=True)
+    longest_streak_end = models.DateField(null=True, blank=True)
+    last_report_notification = models.DateField(null=True, blank=True)
 
     objects = caching.base.CachingManager()
 
@@ -256,6 +279,7 @@ def email_mentor_notification(sender, instance, raw, **kwargs):
                         'new_mentor': instance.mentor}
             send_remo_mail.delay(recipients, subject, email_template,
                                  ctx_data)
+            statsd.incr('profiles.change_mentor')
 
 
 @receiver(post_save, sender=User, dispatch_uid='create_profile_signal')
