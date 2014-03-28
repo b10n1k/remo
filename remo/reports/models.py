@@ -7,7 +7,7 @@ from django.db import models
 from django.db.models.signals import (m2m_changed, post_save, pre_delete,
                                       pre_save)
 from django.dispatch import receiver
-from django.utils.timezone import now as utc_now
+from django.utils.timezone import now
 
 import caching.base
 from django_statsd.clients import statsd
@@ -15,8 +15,9 @@ from south.signals import post_migrate
 
 import remo.base.utils as utils
 from remo.base.utils import (add_permissions_to_groups,
-                             get_object_or_none, go_back_n_months)
+                             get_object_or_none)
 from remo.base.models import GenericActiveManager
+from remo.base.utils import daterange, get_date
 from remo.events.helpers import get_event_link
 from remo.events.models import Attendance as EventAttendance, Event
 from remo.profiles.models import FunctionalArea
@@ -93,47 +94,6 @@ def report_set_month_day_pre_save(sender, instance, **kwargs):
                                        month=instance.month.month, day=1)
 
 
-@receiver(pre_save, sender=Report,
-          dispatch_uid='report_set_overdue_pre_save_signal')
-def report_set_overdue_pre_save(sender, instance, raw, **kwargs):
-    """Set overdue on Report object creation."""
-    today = datetime.date.today()
-    previous_month = go_back_n_months(today, first_day=True)
-
-    if not instance.id and not raw:
-        if (previous_month > instance.month
-            or (previous_month == instance.month
-                and today.day > OVERDUE_DAY)):
-            instance.overdue = True
-
-
-@receiver(post_save, sender=Report,
-          dispatch_uid='email_mentor_on_add_report_signal')
-def email_mentor_on_add_report(sender, instance, created, **kwargs):
-    """Email a mentor when a user adds or edits a report."""
-    subject = '[Report] Your mentee, %s %s a report for %s %s.'
-    email_template = 'emails/mentor_notification_report_added_or_edited.txt'
-    month = instance.month.strftime('%B')
-    year = instance.month.strftime('%Y')
-    rep_user = instance.user
-    rep_profile = instance.user.userprofile
-    mentor_profile = instance.mentor.userprofile
-    ctx_data = {'rep_user': rep_user, 'rep_profile': rep_profile,
-                'new_report': created, 'month': month, 'year': year}
-    if created:
-        if mentor_profile.receive_email_on_add_report:
-            subject = subject % ((rep_profile.display_name,
-                                  'added', month, year))
-            send_remo_mail.delay([instance.mentor.id], subject, email_template,
-                                 ctx_data)
-    else:
-        if mentor_profile.receive_email_on_edit_report:
-            subject = subject % (rep_profile.display_name, 'edited',
-                                 month, year)
-            send_remo_mail.delay([instance.mentor.id], subject, email_template,
-                                 ctx_data)
-
-
 @receiver(pre_delete, sender=EventAttendance,
           dispatch_uid='report_remove_event_signal')
 def report_remove_event(sender, instance, **kwargs):
@@ -157,22 +117,6 @@ class ReportComment(models.Model):
 
     class Meta:
         ordering = ['id']
-
-
-@receiver(post_save, sender=ReportComment,
-          dispatch_uid='email_user_on_add_comment_signal')
-def email_user_on_add_comment(sender, instance, **kwargs):
-    """Email a user when a comment is added to a report."""
-    subject = '[Report] User %s commented on your report of %s'
-    email_template = 'emails/user_notification_on_add_comment.txt'
-    report = instance.report
-    owner = instance.report.user
-    ctx_data = {'report': report, 'owner': owner, 'user': instance.user,
-                'comment': instance.comment, 'created_on': instance.created_on}
-    if owner.userprofile.receive_email_on_add_comment:
-        subject = subject % (instance.user.get_full_name(),
-                             report.month.strftime('%B %Y'))
-        send_remo_mail.delay([owner.id], subject, email_template, ctx_data)
 
 
 class ReportEvent(models.Model):
@@ -269,8 +213,9 @@ class NGReport(caching.base.CachingMixin, models.Model):
     is_passive = models.BooleanField(default=False)
     event = models.ForeignKey(Event, null=True, blank=True)
     link = models.URLField(max_length=500, blank=True, default='')
-    link_description = models.CharField(max_length=200, blank=True, default='')
+    link_description = models.CharField(max_length=500, blank=True, default='')
     activity_description = models.TextField(blank=True, default='')
+    verified_recruitment = models.BooleanField(blank=True, default=False)
 
     objects = caching.base.CachingManager()
 
@@ -300,47 +245,74 @@ class NGReport(caching.base.CachingMixin, models.Model):
 
     @property
     def is_future_report(self):
-        if self.report_date > utc_now().date():
+        if self.report_date > now().date():
             return True
         return False
 
     def save(self, *args, **kwargs):
         """Override save method."""
-        up = self.user.userprofile
-        one_day = datetime.timedelta(1)
+        one_week = datetime.timedelta(7)
+        today = get_date()
+        current_start = self.user.userprofile.current_streak_start or None
+        longest_start = self.user.userprofile.longest_streak_start or None
+        longest_end = self.user.userprofile.longest_streak_end or None
 
         # Save the mentor of the user if no mentor is defined.
         if not self.mentor:
-            self.mentor = up.mentor
-
-        # Calculate the current and longest streak for a user.
-        if not self.is_future_report:
-            if (up.current_streak_start and up.current_streak_end and
-                (self.report_date >= up.current_streak_start - one_day) and
-                    (self.report_date <= up.current_streak_end + one_day)):
-                if self.report_date < up.current_streak_start:
-                    up.current_streak_start = self.report_date
-                if self.report_date > up.current_streak_end:
-                    up.current_streak_end = self.report_date
-            else:
-                up.current_streak_start = self.report_date
-                up.current_streak_end = self.report_date
-
-            # Longest streak
-            if (up.current_streak_start and up.current_streak_end and
-                    up.longest_streak_start and up.longest_streak_end):
-                longest_streak_diff = (up.longest_streak_end -
-                                       up.longest_streak_start)
-                current_streak_diff = (up.current_streak_end -
-                                       up.current_streak_start)
-                if current_streak_diff > longest_streak_diff:
-                    up.longest_streak_start = up.current_streak_start
-                    up.longest_streak_end = up.current_streak_end
-            else:
-                up.longest_streak_start = self.report_date
-                up.longest_streak_end = self.report_date
-            up.save()
+            self.mentor = self.user.userprofile.mentor
         super(NGReport, self).save()
+
+        if self.is_future_report:
+            return
+
+        # If there is already a running streak and the report date
+        # is within this streak, update the current streak counter.
+        if (current_start and self.report_date < current_start and
+            self.report_date in daterange((current_start - one_week),
+                                          current_start)):
+            current_start = self.report_date
+        # If there isn't any current streak, and the report date
+        # is within the current week, let's start the counting.
+        elif (not current_start and
+                self.report_date in daterange(get_date(-7), today)):
+            current_start = self.report_date
+
+        # Longest streak section
+        # If longest streak already exists, let's update it.
+        if longest_start and longest_end:
+
+            # Compare the number of reports registered during
+            # the current streak and the number of reports
+            # during the longest streak. If current streak is bigger
+            # than the previous longest streak, update the longest streak.
+            longest_streak_count = NGReport.objects.filter(
+                report_date__range=(longest_start, longest_end),
+                user=self.user).count()
+            current_streak_count = NGReport.objects.filter(
+                report_date__range=(current_start, today),
+                user=self.user).count()
+            if current_start and current_streak_count > longest_streak_count:
+                longest_start = current_start
+                longest_end = today
+
+            # This happens only when a user appends a report, dated in the
+            # range of longest streak counters and it's out of the range
+            # of current streak counter.
+            elif self.report_date in daterange(longest_start - one_week,
+                                               longest_end + one_week):
+                if self.report_date < longest_start:
+                    longest_start = self.report_date
+                elif self.report_date > longest_end:
+                    longest_end = self.report_date
+        else:
+            # Longest streak counters are empty, let's setup their value
+            longest_start = self.report_date
+            longest_end = self.report_date
+        # Assign the calculated values, to user's profile.
+        self.user.userprofile.current_streak_start = current_start
+        self.user.userprofile.longest_streak_start = longest_start
+        self.user.userprofile.longest_streak_end = longest_end
+        self.user.userprofile.save()
 
     class Meta:
         ordering = ['-report_date', '-created_on']
@@ -349,7 +321,7 @@ class NGReport(caching.base.CachingMixin, models.Model):
         if self.activity.name == ACTIVITY_EVENT_ATTEND and self.event:
             return 'Attended event "%s"' % self.event.name
         elif self.activity.name == ACTIVITY_EVENT_CREATE and self.event:
-            return 'Created event "%s"' % self.event.name
+            return 'Organized event "%s"' % self.event.name
         elif self.activity.name == ACTIVITY_CAMPAIGN:
             return 'Participated in campaign "%s"' % self.campaign.name
         else:
@@ -524,3 +496,89 @@ def email_commenters_on_add_ng_report_comment(sender, instance, **kwargs):
             subject = subject.format(instance.user.get_full_name(), report)
             send_remo_mail.delay([user_id], subject,
                                  email_template, ctx_data)
+
+
+@receiver(pre_delete, sender=NGReport,
+          dispatch_uid='delete_ng_report_signal')
+def delete_ng_report(sender, instance, **kwargs):
+    """Automatically update user's streak counters."""
+    today = get_date()
+    current_start = instance.user.userprofile.current_streak_start or None
+    longest_start = instance.user.userprofile.longest_streak_start or None
+    longest_end = instance.user.userprofile.longest_streak_end or None
+
+    # If instance is in the future or there is another
+    # report that date, don't do anything
+    if (instance.is_future_report or
+        (NGReport.objects
+         .filter(user=instance.user, report_date=instance.report_date)
+         .exclude(pk=instance.id).exists())):
+        return
+
+    try:
+        next_report = instance.get_next_by_report_date(
+            user=instance.user, report_date__lte=today)
+    except NGReport.DoesNotExist:
+        next_report = None
+
+    try:
+        previous_report = instance.get_previous_by_report_date(
+            user=instance.user)
+    except NGReport.DoesNotExist:
+        previous_report = None
+
+    # There aren't any reports
+    if not next_report and not previous_report:
+        current_start = None
+        longest_start = None
+        longest_end = None
+
+    # If the deleted report is between the range of the longest
+    # streak counters, we need to update them.
+    elif (longest_start and longest_end and
+          instance.report_date in daterange(longest_start, longest_end)):
+
+        if longest_start == instance.report_date and next_report:
+            longest_start = next_report.report_date
+        elif longest_end == instance.report_date and previous_report:
+            longest_end = previous_report.report_date
+        elif (previous_report and next_report and
+              (next_report.report_date -
+               previous_report.report_date).days > 7):
+            # Compare the number of reports registered from the starting point
+            # of the longest streak up until the date of the deleted report,
+            # with the number of reports registered from the date of the
+            # deleted report until the end of the longest streak.
+            lower_half_report_count = NGReport.objects.filter(
+                report_date__range=(longest_start, instance.report_date),
+                user=instance.user).count()
+            upper_half_report_count = NGReport.objects.filter(
+                report_date__range=(instance.report_date, longest_end),
+                user=instance.user).count()
+
+            # If the first time slice contains more reports, then we need
+            # to move the end of the longest streak, just before
+            # the deletion point. If the opposite is true, move the starting
+            # point of the longest streak just after the deletion point.
+            if (lower_half_report_count >= upper_half_report_count and
+                    previous_report.report_date >= longest_start):
+                longest_end = previous_report.report_date
+            elif (upper_half_report_count > lower_half_report_count and
+                    next_report.report_date <= longest_end):
+                longest_start = next_report.report_date
+
+    # If the deleted report is between the range of the current
+    # streak counter and today, then we need to update the counter.
+    if (current_start and
+            instance.report_date in daterange(current_start, today)):
+        if current_start == instance.report_date and next_report:
+            current_start = next_report.report_date
+        elif (previous_report and next_report and
+                (next_report.report_date -
+                 previous_report.report_date).days > 7):
+            current_start = next_report.report_date
+
+    instance.user.userprofile.current_streak_start = current_start
+    instance.user.userprofile.longest_streak_start = longest_start
+    instance.user.userprofile.longest_streak_end = longest_end
+    instance.user.userprofile.save()

@@ -1,8 +1,6 @@
 import calendar
 import datetime
-import pytz
 
-from django.conf import settings
 from django.contrib.auth.management import create_permissions
 from django.contrib.auth.models import Group, Permission
 from django.core.exceptions import ValidationError
@@ -115,8 +113,18 @@ def validate_datetime(data, **kwargs):
     return data
 
 
-def datetime2pdt(datetime_obj=None):
-    if not datetime_obj:
-        datetime_obj = datetime.datetime.now().replace(microsecond=0)
-    return timezone.make_aware(datetime_obj,
-                               pytz.timezone(settings.TIME_ZONE))
+def get_date(number_of_days=0):
+    """Return a date in UTC timezone, given an offset in days.
+
+    The calculation is based on the current date and the
+    offset can be either positive or negative.
+    """
+
+    return (timezone.now().date() +
+            datetime.timedelta(days=number_of_days))
+
+
+def daterange(start_date, end_date):
+    """Generator with a range of dates given a starting and ending point."""
+    for i in range((end_date - start_date).days + 1):
+        yield start_date + datetime.timedelta(i)

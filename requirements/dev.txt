@@ -6,5 +6,5 @@
 -r compiled.txt
 -r prod.txt
 
-fudge
 pyquery
+flake8

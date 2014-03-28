@@ -1,96 +1,13 @@
 from django import forms
 from django.core.exceptions import ValidationError
-from django.utils.timezone import now as now_utc
+from django.db.models import Q
+from django.utils.timezone import now
 
 import happyforms
 
+from remo.profiles.models import FunctionalArea
 from remo.reports import ACTIVITY_CAMPAIGN, UNLISTED_ACTIVITIES
-from remo.reports.models import (Activity, Campaign, NGReport, NGReportComment,
-                                 Report, ReportComment, ReportEvent,
-                                 ReportLink)
-
-
-# Old reporting system
-class ReportForm(happyforms.ModelForm):
-    """Form of a report."""
-    past_items = forms.CharField(
-        required=False,
-        widget=forms.Textarea(
-            attrs={'id': 'past_items',
-                   'class': 'flat',
-                   'placeholder': ('Summary or list of Rep activities you '
-                                   'were involved in this past month'),
-                   'cols': '',
-                   'rows': ''}))
-    future_items = forms.CharField(
-        required=False,
-        widget=forms.Textarea(
-            attrs={'id': 'future_items',
-                   'class': 'flat',
-                   'placeholder': ('What Rep activity/ies do you plan to be '
-                                   'involved in next month?'),
-                   'cols': '',
-                   'rows': ''}))
-
-    recruits_comments = forms.CharField(
-        required=False,
-        widget=forms.Textarea(
-            attrs={'id': 'recruits_comments',
-                   'class': 'flat',
-                   'placeholder': ('Were you successful in recruiting new '
-                                   'Mozillians? If so, for which project or '
-                                   'community?'),
-                   'cols': '',
-                   'rows': ''}))
-    flags = forms.CharField(
-        required=False,
-        widget=forms.Textarea(
-            attrs={'id': 'flags',
-                   'class': 'flat',
-                   'placeholder': ('Notify your mentor about any help you '
-                                   'might need or any suggestions you might '
-                                   'have to improve the program'),
-                   'cols': '',
-                   'rows': ''}))
-
-    def clean(self):
-        cleaned_data = super(ReportForm, self).clean()
-        if ((not cleaned_data['future_items'] and
-             not cleaned_data['past_items'])):
-            cleaned_data['empty'] = True
-        else:
-            cleaned_data['empty'] = False
-
-        return cleaned_data
-
-    class Meta:
-        model = Report
-        fields = ['empty', 'recruits_comments', 'past_items',
-                  'future_items', 'flags', 'overdue']
-
-
-class ReportCommentForm(happyforms.ModelForm):
-    """Form of a report comment."""
-
-    class Meta:
-        model = ReportComment
-        fields = ['comment']
-
-
-class ReportEventForm(happyforms.ModelForm):
-    """Form of report event."""
-
-    class Meta:
-        model = ReportEvent
-        fields = ['name', 'description', 'link', 'participation_type']
-
-
-class ReportLinkForm(happyforms.ModelForm):
-    """Form of report link."""
-
-    class Meta:
-        model = ReportLink
-        fields = ['description', 'link']
+from remo.reports.models import Activity, Campaign, NGReport, NGReportComment
 
 
 # New Generation reporting system
@@ -100,6 +17,8 @@ class NGReportForm(happyforms.ModelForm):
         queryset=Activity.active_objects.exclude(name__in=UNLISTED_ACTIVITIES))
     campaign = forms.ModelChoiceField(queryset=Campaign.active_objects.all(),
                                       required=False)
+    functional_areas = forms.ModelMultipleChoiceField(
+        queryset=FunctionalArea.active_objects.all())
 
     def __init__(self, *args, **kwargs):
         """ Initialize form.
@@ -111,6 +30,13 @@ class NGReportForm(happyforms.ModelForm):
         self.fields['activity'].error_messages['required'] = (
             'Please select an option from the list.')
         self.fields['campaign'].empty_label = 'Please select a campaign.'
+
+        # Dynamic functional_areas field
+        if self.instance.id:
+            current_areas = self.instance.functional_areas.all()
+            query = Q(active=True) | Q(id__in=current_areas)
+            areas = FunctionalArea.objects.filter(query)
+            self.fields['functional_areas'].queryset = areas
 
     def clean(self):
         """Clean Form."""
@@ -127,7 +53,7 @@ class NGReportForm(happyforms.ModelForm):
 
     def clean_report_date(self):
         """Clean report_date field."""
-        if self.cleaned_data['report_date'] > now_utc().date():
+        if self.cleaned_data['report_date'] > now().date():
             raise ValidationError('Report date cannot be in the future.')
         return self.cleaned_data['report_date']
 
@@ -139,6 +65,17 @@ class NGReportForm(happyforms.ModelForm):
         widgets = {'longitude': forms.HiddenInput(),
                    'latitude': forms.HiddenInput(),
                    'functional_areas': forms.SelectMultiple()}
+
+
+class NGVerifyReportForm(happyforms.ModelForm):
+    """Form to verify a recruitment."""
+    verified_recruitment = forms.BooleanField(
+        required=False, initial=False,
+        label=('I have verified this activity'))
+
+    class Meta:
+        model = NGReport
+        fields = ['verified_recruitment']
 
 
 class NGReportCommentForm(happyforms.ModelForm):

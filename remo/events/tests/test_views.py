@@ -6,7 +6,7 @@ from django.core import mail
 from django.core.urlresolvers import reverse
 from django.test.utils import override_settings
 from django.utils.encoding import iri_to_uri
-from django.utils.timezone import make_aware
+from django.utils.timezone import make_aware, now
 
 from mock import ANY
 from nose.tools import eq_, ok_
@@ -16,7 +16,7 @@ from test_utils import TestCase
 from remo.base.tests import requires_login, requires_permission
 from remo.events.models import Event, EventComment, Metric
 from remo.events.tests import (AttendanceFactory, EventCommentFactory,
-                               EventFactory)
+                               EventFactory, EventGoalFactory)
 from remo.profiles.tests import FunctionalAreaFactory, UserFactory
 
 
@@ -26,11 +26,13 @@ class ViewsTest(TestCase):
     def setUp(self):
 
         categories = FunctionalAreaFactory.create_batch(3)
+        goals = EventGoalFactory.create_batch(3)
         self.data = {
             'name': u'Test edit event',
             'description': u'This is a description',
             'external_link': '',
             'categories': [x.id for x in categories],
+            'goals': [x.id for x in goals],
             'venue': u'Hackerspace.GR',
             'lat': 38.01697,
             'lon': 23.7314,
@@ -370,8 +372,8 @@ class ViewsTest(TestCase):
 
     def test_multi_event_ical_export_future(self):
         """Test multiple past event ical export."""
-        start = datetime.datetime.now() + datetime.timedelta(days=1)
-        end = datetime.datetime.now() + datetime.timedelta(days=2)
+        start = now() + datetime.timedelta(days=1)
+        end = now() + datetime.timedelta(days=2)
         EventFactory.create_batch(2, start=start, end=end)
 
         # Export future events to iCal
@@ -384,8 +386,8 @@ class ViewsTest(TestCase):
 
     def test_multi_event_ical_export_custom(self):
         """Test multiple event ical export with custom date."""
-        event_start = datetime.datetime.now() + datetime.timedelta(days=1)
-        event_end = datetime.datetime.now() + datetime.timedelta(days=2)
+        event_start = now() + datetime.timedelta(days=1)
+        event_end = now() + datetime.timedelta(days=2)
         EventFactory.create_batch(2, start=event_start, end=event_end)
         period = 'custom'
         response = self.client.get(reverse('multiple_event_ical',
@@ -500,7 +502,7 @@ class ViewsTest(TestCase):
 
         # Test fields with the same name in POST data and models
         excluded = ['planning_pad_url', 'lat', 'lon', 'mozilla_event',
-                    'categories']
+                    'categories', 'goals']
         for field in set(self.data).difference(set(excluded)):
             if getattr(event, field, None):
                 eq_(str(getattr(event, field)), self.data[field])
@@ -511,6 +513,7 @@ class ViewsTest(TestCase):
 
         eq_(self.data['categories'], [cat.id
                                       for cat in event.categories.all()])
+        eq_(self.data['goals'], [goal.id for goal in event.goals.all()])
 
         eq_(event.planning_pad_url, pad_url)
         eq_(event.lat, self.data['lat'])

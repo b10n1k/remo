@@ -1,6 +1,6 @@
-import pytz
+from datetime import timedelta
 
-from datetime import datetime, timedelta
+from django.forms.models import inlineformset_factory
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user
@@ -9,7 +9,7 @@ from django.core.urlresolvers import reverse
 from django.http import HttpResponse, Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
-from django.utils import timezone
+from django.utils.timezone import now
 from django.utils.encoding import iri_to_uri
 from django.views.decorators.cache import cache_control, never_cache
 from django.views.decorators.csrf import csrf_exempt
@@ -18,13 +18,12 @@ from django_statsd.clients import statsd
 from funfactory.helpers import urlparams
 from jinja2 import Markup
 
+import forms
 from remo.base.decorators import permission_check
 from remo.base.forms import EmailUsersForm
 from remo.base.utils import get_or_create_instance
+from remo.events.models import Attendance, Event, EventComment, Metric
 from remo.profiles.models import FunctionalArea
-
-import forms
-from models import Attendance, Event, EventComment
 
 
 @never_cache
@@ -38,7 +37,7 @@ def redirect_list_events(request):
 def list_events(request):
     """List events view."""
     events = Event.objects.all()
-    categories = FunctionalArea.active_objects.all()
+    categories = FunctionalArea.objects.all()
     return render(request, 'list_events.html',
                   {'events': events, 'categories': categories})
 
@@ -145,10 +144,10 @@ def delete_event_comment(request, slug, pk):
 @permission_check(permissions=['events.can_edit_events'])
 def edit_event(request, slug=None, clone=None):
     """Edit event view."""
+    initial = {}
+    extra_formsets = 2
 
     event, created = get_or_create_instance(Event, slug=slug)
-
-    initial = {}
 
     if created:
         event.owner = request.user
@@ -165,6 +164,9 @@ def edit_event(request, slug=None, clone=None):
         if (event.end.minute % 5) != 0:
             event.end += timedelta(minutes=(5 - (event.end.minute % 5)))
 
+        # If an event is edited, do not add any more formsets
+        extra_formsets = 0
+
     editable = False
     if request.user.groups.filter(name='Admin').count():
         editable = True
@@ -173,8 +175,11 @@ def edit_event(request, slug=None, clone=None):
                                  editable_owner=editable, instance=event,
                                  initial=initial)
 
-    metrics_formset = forms.EventMetricsFormset(request.POST or None,
-                                                instance=event)
+    EventMetricsFormset = inlineformset_factory(
+        Event, Metric, formset=forms.MinBaseInlineFormSet,
+        extra=extra_formsets)
+    metrics_formset = EventMetricsFormset(request.POST or None,
+                                          instance=event)
 
     if (event_form.is_valid() and metrics_formset.is_valid() and request.POST):
         event_form.save(clone=clone)
@@ -199,12 +204,14 @@ def edit_event(request, slug=None, clone=None):
         can_delete_event = True
 
     selected_categories = map(int, event_form['categories'].value())
+    selected_goals = map(int, event_form['goals'].value())
 
     return render(request, 'edit_event.html',
                   {'creating': created,
                    'event': event,
                    'event_form': event_form,
                    'selected_categories': selected_categories,
+                   'selected_goals': selected_goals,
                    'metrics_formset': metrics_formset,
                    'can_delete_event': can_delete_event})
 
@@ -242,10 +249,9 @@ def count_converted_visitors(request, slug):
 def export_single_event_to_ical(request, slug):
     """ICal export of single event."""
     event = get_object_or_404(Event, slug=slug)
-    date_now = timezone.make_aware(datetime.now(), pytz.UTC)
     ical = render(request, 'multi_event_ical_template.ics',
                   {'events': [event],
-                   'date_now': date_now,
+                   'date_now': now(),
                    'host': settings.SITE_URL})
     response = HttpResponse(ical, mimetype='text/calendar')
     ical_filename = event.slug + '.ics'
@@ -278,14 +284,12 @@ def multiple_event_ical(request, period, start=None, end=None, search=None):
     # Create API query
     url = reverse('api_dispatch_list', kwargs={'api_name': 'v1',
                                                'resource_name': 'event'})
-    now = timezone.make_aware(datetime.now(), pytz.UTC)
-
     if period == 'all':
         url = urlparams(url, start__gt='1970-01-01')
     elif period == 'future':
-        url = urlparams(url, start__gte=now.strftime("%Y-%m-%d"))
+        url = urlparams(url, start__gte=now().strftime("%Y-%m-%d"))
     elif period == 'past':
-        url = urlparams(url, start__lt=now.strftime("%Y-%m-%d"))
+        url = urlparams(url, start__lt=now().strftime("%Y-%m-%d"))
     elif period == 'custom':
         if start:
             url = urlparams(url, start__gte=start)

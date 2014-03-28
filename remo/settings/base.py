@@ -1,6 +1,6 @@
 # This is your project's main settings file that can be committed to your
 # repo. If you need to override a setting locally, use settings_local.py
-from funfactory.settings_base import *
+from funfactory.settings_base import *  # noqa
 
 # Defines the views served for root URLs.
 ROOT_URLCONF = 'remo.urls'
@@ -104,6 +104,7 @@ MANAGERS = ADMINS
 # Allow robots to crawl the site.
 ENGAGE_ROBOTS = True
 
+TIME_ZONE = 'UTC'
 USE_TZ = True
 
 ETHERPAD_URL = 'http://etherpad.mozilla.org/'
@@ -132,6 +133,7 @@ def JINJA_CONFIG():
 
 CELERYBEAT_SCHEDULER = 'djcelery.schedulers.DatabaseScheduler'
 CELERY_ENABLE_UTC = True
+CELERY_TIMEZONE = 'UTC'
 
 COMPRESS_ENABLED = True
 COMPRESS_OFFLINE = True
