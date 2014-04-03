@@ -138,6 +138,11 @@
                 <td>
                   <a href="{{ report.get_absolute_url() }}">
                     {{ report }}
+                    <!-- show a checkmark on the dashboard -->
+                    {% if report.verified_recruitment %}
+                      &nbsp;
+                      &#10004;
+                    {% endif %}
                   </a>
                 </td>
                 <td>
