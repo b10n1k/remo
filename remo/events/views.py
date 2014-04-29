@@ -24,6 +24,7 @@ from remo.base.forms import EmailUsersForm
 from remo.base.utils import get_or_create_instance
 from remo.events.models import Attendance, Event, EventComment, Metric
 from remo.profiles.models import FunctionalArea
+from helpers import is_past_event
 
 
 @never_cache
@@ -63,11 +64,14 @@ def manage_subscription(request, slug, subscribe=True):
                 messages.warning(request, ('You are already subscribed to '
                                            'this event.'))
             else:
-                attendance.save()
-                subscribed_text = render_to_string(
-                    'includes/subscribe_to_ical.html', {'event': event})
-                messages.info(request, Markup(subscribed_text))
-                statsd.incr('events.subscribe_to_event')
+                if not is_past_event(event):
+                    attendance.save()
+                    subscribed_text = render_to_string(
+                        'includes/subscribe_to_ical.html', {'event': event})
+                    messages.info(request, Markup(subscribed_text))
+                    statsd.incr('events.subscribe_to_event')
+                else:
+                    messages.info(request, 'You subscribed to this event.')
 
         else:
             if created:
